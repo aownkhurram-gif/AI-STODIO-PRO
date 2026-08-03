@@ -1,0 +1,6 @@
+{
+  "name": "AI Studio Pro - Free Image to Video & Prompt to Video Generator",
+  "description": "Free, HD, Long Video 3D Cartoon Animation Generator with Image to Video and Prompt to Video features.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
