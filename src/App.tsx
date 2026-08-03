@@ -16,7 +16,39 @@ import { PricingView } from './components/PricingView';
 import { FaqSeoView } from './components/FaqSeoView';
 import { SettingsModal } from './components/SettingsModal';
 import { generate3DMovieVideo } from './utils/videoEngine';
-import { Image as ImageIcon, MessageSquare, Film } from 'lucide-react';
+import { Image as ImageIcon, MessageSquare, Film, AlertTriangle, Key, Sparkles } from 'lucide-react';
+
+// Helper: Safe fetch & JSON response parser
+async function parseResponseTextSafely(res: Response) {
+  const text = await res.text();
+  if (!text || text.trim() === '') {
+    console.log('Response body is empty.');
+    throw new Error('API Key galat hai ya credit khatam hai, please check .env file');
+  }
+  try {
+    return JSON.parse(text);
+  } catch (err) {
+    console.log('Raw non-JSON output:', text);
+    throw new Error(`Invalid JSON response: ${text.slice(0, 120)}`);
+  }
+}
+
+// Fallback Function: 100% Free HuggingFace API
+async function generateWithHuggingFace(image: string | null, prompt: string, customHfToken?: string) {
+  const hfToken = customHfToken || import.meta.env.VITE_HF_TOKEN || localStorage.getItem('hf_api_key') || '';
+  
+  const res = await fetch('/api/generate-huggingface', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ image, prompt, hfToken })
+  });
+
+  const data = await parseResponseTextSafely(res);
+  if (!data.success || !data.videoUrl) {
+    throw new Error(data.error || 'API Key galat hai ya credit khatam hai, please check .env file');
+  }
+  return data.videoUrl;
+}
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabType>('img2vid');
@@ -28,6 +60,7 @@ export default function App() {
   const [stageText, setStageText] = useState<string>('');
   const [currentSceneNum, setCurrentSceneNum] = useState<number>(1);
   const [totalScenesNum, setTotalScenesNum] = useState<number>(1);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   // Saved Videos & Current Result
   const [savedVideos, setSavedVideos] = useState<GeneratedVideo[]>([]);
@@ -48,6 +81,23 @@ export default function App() {
     }
   }, []);
 
+  // Check API keys status
+  const checkApiKeyConfig = () => {
+    const repToken = import.meta.env.VITE_REPLICATE_API_TOKEN || localStorage.getItem('replicate_api_key') || '';
+    const hfToken = import.meta.env.VITE_HF_TOKEN || localStorage.getItem('hf_api_key') || '';
+    
+    const isRepValid = Boolean(repToken && !repToken.includes('xxxxxxxx') && !repToken.includes('YOUR_FREE_KEY'));
+    const isHfValid = Boolean(hfToken && !hfToken.includes('xxxxxxxx') && !hfToken.includes('YOUR_FREE_KEY'));
+
+    return {
+      isRepValid,
+      isHfValid,
+      hasAnyKey: isRepValid || isHfValid,
+      repToken,
+      hfToken
+    };
+  };
+
   // Save videos to LocalStorage on update
   const saveVideosToStorage = (videos: GeneratedVideo[]) => {
     setSavedVideos(videos);
@@ -64,39 +114,60 @@ export default function App() {
     prompt: string,
     settings: GenerationSettings
   ) => {
+    setErrorMessage(null);
     setIsGenerating(true);
     setProgress(2);
-    setStageText('Checking 3 API Rotation System (HuggingFace -> Fal.ai -> Replicate)...');
+    setStageText('API Key & Credit Validation Checking...');
+
+    const keys = checkApiKeyConfig();
+    if (!keys.hasAnyKey) {
+      setErrorMessage("API Key Missing! Please add your free key in .env file or Settings modal");
+    }
 
     try {
       const customKeys = {
-        hf: localStorage.getItem('hf_api_key') || undefined,
-        fal: localStorage.getItem('fal_api_key') || undefined,
-        replicate: localStorage.getItem('replicate_api_key') || undefined,
+        hf: keys.hfToken || undefined,
+        replicate: keys.repToken || undefined,
       };
 
       let videoUrl: string | null = null;
       let usedProvider = "AI Studio Pro Client Engine";
 
-      // 1. Try 3 API Auto Rotation Server System
+      // 1. Attempt Replicate / Auto API System
       try {
+        setStageText('Connecting to Replicate API...');
         const autoRes = await fetch('/api/generate-video-auto', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ image, prompt, customKeys })
         });
-        const autoData = await autoRes.json();
+
+        const autoData = await parseResponseTextSafely(autoRes);
         if (autoData.success && autoData.videoUrl) {
           videoUrl = autoData.videoUrl;
           usedProvider = autoData.provider || "3 API Rotation System";
           setProgress(95);
           setStageText(`Generated via ${usedProvider}!`);
+        } else {
+          throw new Error(autoData.error || "Replicate credit khatam");
         }
-      } catch (autoErr) {
-        console.warn("Auto rotation external API check skipped, switching to client engine:", autoErr);
+      } catch (repErr: any) {
+        console.warn("Replicate API skipped or credit exhausted:", repErr.message);
+        setStageText("Replicate credit khatam, ab free HuggingFace se bana raha hun...");
+
+        // 2. Fallback to Free HuggingFace API
+        try {
+          videoUrl = await generateWithHuggingFace(image, prompt, keys.hfToken);
+          usedProvider = "HuggingFace (Free)";
+          setProgress(95);
+          setStageText("Generated via HuggingFace Free Endpoint!");
+        } catch (hfErr: any) {
+          console.warn("HuggingFace API fallback failed:", hfErr.message);
+          setErrorMessage("API Key galat hai ya credit khatam hai, please check .env file");
+        }
       }
 
-      // 2. Fetch Multi-Scene Script Breakdown for 3D Movie Engine
+      // 3. Fetch Multi-Scene Script Breakdown
       const scriptRes = await fetch('/api/generate-script', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -107,12 +178,18 @@ export default function App() {
           lang: settings.voiceoverLang
         })
       });
-      const scriptData = await scriptRes.json();
-      const scenes: ScriptScene[] = scriptData.scenes || [];
-      setTotalScenesNum(scenes.length);
 
-      // If external API didn't return direct video, synthesize with client high-performance rendering engine
-      let scenesCount = scenes.length;
+      let scenes: ScriptScene[] = [];
+      try {
+        const scriptData = await parseResponseTextSafely(scriptRes);
+        scenes = scriptData.scenes || [];
+      } catch (e) {
+        console.warn("Script breakdown warning:", e);
+      }
+      setTotalScenesNum(scenes.length || 1);
+
+      // If external APIs failed or returned empty, synthesize using 3D Canvas engine
+      let scenesCount = scenes.length || 1;
       if (!videoUrl) {
         setStageText('Auto Failover: Generating 3D Movie via High-Performance Client Engine...');
         const result = await generate3DMovieVideo(
@@ -131,7 +208,7 @@ export default function App() {
         scenesCount = result.scenesCount;
       }
 
-      // 3. Create GeneratedVideo Object
+      // 4. Create GeneratedVideo Object
       const newVideo: GeneratedVideo = {
         id: 'vid_' + Date.now(),
         title: prompt.slice(0, 45) + (prompt.length > 45 ? '...' : ''),
@@ -148,13 +225,12 @@ export default function App() {
         scenesCount: scenesCount
       };
 
-      // 4. Update state & storage
       const updatedList = [newVideo, ...savedVideos];
       saveVideosToStorage(updatedList);
       setCurrentVideoResult(newVideo);
     } catch (err: any) {
       console.error("Video Generation Error:", err);
-      alert("Error generating video: " + (err.message || "Please try again"));
+      setErrorMessage(err.message || "API Key galat hai ya credit khatam hai, please check .env file");
     } finally {
       setIsGenerating(false);
     }
@@ -165,39 +241,60 @@ export default function App() {
     prompt: string,
     settings: GenerationSettings
   ) => {
+    setErrorMessage(null);
     setIsGenerating(true);
     setProgress(2);
-    setStageText('Checking 3 API Rotation System (HuggingFace -> Fal.ai -> Replicate)...');
+    setStageText('API Key & Credit Validation Checking...');
+
+    const keys = checkApiKeyConfig();
+    if (!keys.hasAnyKey) {
+      setErrorMessage("API Key Missing! Please add your free key in .env file or Settings modal");
+    }
 
     try {
       const customKeys = {
-        hf: localStorage.getItem('hf_api_key') || undefined,
-        fal: localStorage.getItem('fal_api_key') || undefined,
-        replicate: localStorage.getItem('replicate_api_key') || undefined,
+        hf: keys.hfToken || undefined,
+        replicate: keys.repToken || undefined,
       };
 
       let videoUrl: string | null = null;
       let usedProvider = "AI Studio Pro Client Engine";
 
-      // 1. Try 3 API Auto Rotation Server System
+      // 1. Attempt Replicate / Auto API System
       try {
+        setStageText('Connecting to Replicate API...');
         const autoRes = await fetch('/api/generate-video-auto', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ prompt, customKeys })
         });
-        const autoData = await autoRes.json();
+
+        const autoData = await parseResponseTextSafely(autoRes);
         if (autoData.success && autoData.videoUrl) {
           videoUrl = autoData.videoUrl;
           usedProvider = autoData.provider || "3 API Rotation System";
           setProgress(95);
           setStageText(`Generated via ${usedProvider}!`);
+        } else {
+          throw new Error(autoData.error || "Replicate credit khatam");
         }
-      } catch (autoErr) {
-        console.warn("Auto rotation external API check skipped, switching to client engine:", autoErr);
+      } catch (repErr: any) {
+        console.warn("Replicate API skipped or credit exhausted:", repErr.message);
+        setStageText("Replicate credit khatam, ab free HuggingFace se bana raha hun...");
+
+        // 2. Fallback to Free HuggingFace API
+        try {
+          videoUrl = await generateWithHuggingFace(null, prompt, keys.hfToken);
+          usedProvider = "HuggingFace (Free)";
+          setProgress(95);
+          setStageText("Generated via HuggingFace Free Endpoint!");
+        } catch (hfErr: any) {
+          console.warn("HuggingFace API fallback failed:", hfErr.message);
+          setErrorMessage("API Key galat hai ya credit khatam hai, please check .env file");
+        }
       }
 
-      // 2. Fetch Multi-Scene Script Breakdown from Server
+      // 3. Fetch Multi-Scene Script Breakdown
       const scriptRes = await fetch('/api/generate-script', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -208,12 +305,18 @@ export default function App() {
           lang: settings.voiceoverLang
         })
       });
-      const scriptData = await scriptRes.json();
-      const scenes: ScriptScene[] = scriptData.scenes || [];
-      setTotalScenesNum(scenes.length);
 
-      // If external API didn't return direct video, synthesize with client engine
-      let scenesCount = scenes.length;
+      let scenes: ScriptScene[] = [];
+      try {
+        const scriptData = await parseResponseTextSafely(scriptRes);
+        scenes = scriptData.scenes || [];
+      } catch (e) {
+        console.warn("Script breakdown warning:", e);
+      }
+      setTotalScenesNum(scenes.length || 1);
+
+      // If external APIs failed or returned empty, synthesize using 3D Canvas engine
+      let scenesCount = scenes.length || 1;
       if (!videoUrl) {
         setStageText('Auto Failover: Generating 3D Pixar Animation Movie via Client Engine...');
         const result = await generate3DMovieVideo(
@@ -232,7 +335,7 @@ export default function App() {
         scenesCount = result.scenesCount;
       }
 
-      // 3. Create GeneratedVideo Object
+      // 4. Create GeneratedVideo Object
       const newVideo: GeneratedVideo = {
         id: 'vid_' + Date.now(),
         title: prompt.slice(0, 45) + (prompt.length > 45 ? '...' : ''),
@@ -248,13 +351,12 @@ export default function App() {
         scenesCount: scenesCount
       };
 
-      // 4. Update state & storage
       const updatedList = [newVideo, ...savedVideos];
       saveVideosToStorage(updatedList);
       setCurrentVideoResult(newVideo);
     } catch (err: any) {
       console.error("Video Generation Error:", err);
-      alert("Error generating video: " + (err.message || "Please try again"));
+      setErrorMessage(err.message || "API Key galat hai ya credit khatam hai, please check .env file");
     } finally {
       setIsGenerating(false);
     }
@@ -282,6 +384,34 @@ export default function App() {
       {/* Main Container */}
       <main className="flex-1 max-w-6xl w-full mx-auto px-4 sm:px-6 py-6 space-y-8">
         
+        {/* API Error Box Banner */}
+        {errorMessage && (
+          <div className="p-4 rounded-2xl bg-rose-950/80 border border-rose-500/50 text-rose-200 text-xs flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-xl animate-fade-in">
+            <div className="flex items-center gap-2.5">
+              <AlertTriangle className="w-5 h-5 text-rose-400 flex-shrink-0" />
+              <div>
+                <p className="font-bold text-sm text-white">API Key / Generation Notice</p>
+                <p className="text-rose-300 font-medium">{errorMessage}</p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setSettingsModalOpen(true)}
+                className="px-3.5 py-2 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-bold text-xs transition-colors flex items-center gap-1.5"
+              >
+                <Key className="w-3.5 h-3.5" />
+                <span>Configure Keys</span>
+              </button>
+              <button
+                onClick={() => setErrorMessage(null)}
+                className="px-3 py-2 rounded-xl bg-rose-900/60 hover:bg-rose-900 text-rose-300 font-bold text-xs"
+              >
+                Dismiss
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Render Views based on activeTab */}
         {activeTab === 'pricing' ? (
           <PricingView onSelectPlan={() => setActiveTab('img2vid')} />
